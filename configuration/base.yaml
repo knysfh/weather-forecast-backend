@@ -1,0 +1,12 @@
+---
+application:
+  port: 8241
+database:
+  database_name: weather_info
+  host: localhost
+  password: password
+  port: 5432
+  username: postgres
+weather_client:
+  base_url: https://api.tomorrow.io/v4/weather
+  timeout_milliseconds: 10000
