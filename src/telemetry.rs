@@ -4,7 +4,7 @@ use tracing_subscriber::FmtSubscriber;
 
 pub fn get_subscriber() -> FmtSubscriber {
     FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::INFO)
         .with_line_number(true)
         .with_target(true)
         .finish()

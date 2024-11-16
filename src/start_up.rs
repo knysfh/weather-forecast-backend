@@ -1,20 +1,15 @@
-use std::time;
+use std::time::{self};
 
 use axum::{
-    body::Body,
-    http::Request,
-    middleware::{self, Next},
-    response::Response,
     routing::{get, post},
     Router,
 };
 
 use axum_messages::MessagesManagerLayer;
-use chrono::Utc;
-use reqwest::StatusCode;
 use sqlx::{postgres::PgPoolOptions, PgPool, Pool, Postgres};
 use tokio::net::TcpListener;
-use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
+use tower::ServiceBuilder;
+use tower_sessions::{cookie, Expiry, MemoryStore, SessionManagerLayer};
 
 use crate::{
     configuration::{DatabaseSettings, Settings},
@@ -28,21 +23,6 @@ pub fn get_connection_pool(configuration: DatabaseSettings) -> PgPool {
         .connect_lazy_with(configuration.with_db())
 }
 
-async fn session_middleware(
-    session: Session,
-    request: Request<Body>,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let utc_now = Utc::now();
-    session
-        .insert("last_activity_time", utc_now)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let response = next.run(request).await;
-    Ok(response)
-}
-
 pub struct Application {
     port: u16,
     server: Server,
@@ -51,13 +31,6 @@ pub struct Application {
 pub struct Server {
     listener: TcpListener,
     router: Router,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct SessionData {
-    pub user_id: String,
-    pub create_timestamp: String,
-    pub expire_time: i32,
 }
 
 #[derive(Clone)]
@@ -79,24 +52,31 @@ impl Application {
             configuration.application.host, configuration.application.port
         );
         let session_store = MemoryStore::default();
+        let session_expiry = Expiry::OnInactivity(cookie::time::Duration::hours(2));
         let session_layer = SessionManagerLayer::new(session_store)
-            .with_secure(false)
-            .with_name("session_id");
+            .with_secure(true)
+            .with_expiry(session_expiry);
         let listener = TcpListener::bind(address).await?;
         let port = listener.local_addr().unwrap().port();
+
+        let login_router = Router::new().route("/", get(login_form).post(login));
+
         let admin_router = Router::new()
-            .route("/", get(|| async {}))
+            .route("/", get(home))
             .route("/dashboard", get(admin_dashboard))
             .route("/logout", post(log_out));
+
         let router = Router::new()
             .route("/", get(home))
             .route("/home", get(home))
-            .route("/login", get(login_form).post(login))
+            .nest("/login", login_router)
             .nest("/admin", admin_router)
             .route("/update_weather", post(update_weather_data))
-            .layer(middleware::from_fn(session_middleware))
-            .layer(MessagesManagerLayer)
-            .layer(session_layer)
+            .layer(
+                ServiceBuilder::new()
+                    .layer(session_layer)
+                    .layer(MessagesManagerLayer),
+            )
             .with_state(shared_state);
 
         let server = Server { listener, router };

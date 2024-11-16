@@ -6,10 +6,9 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18" }
+tracing-subscriber = { version = "0.3.18" , features = ["registry", "env-filter"]}
 axum = { version = "0.7.7", features = ["macros"] }
 axum-messages = "0.7.0"
-axum-extra = { version = "0.9.4", features = ["cookie"] }
 anyhow = "1.0.89"
 serde = { version = "1.0.210", features = ["derive"]}
 serde_json = "1.0.129"
@@ -17,7 +16,6 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 config = "0.14.0"
 tower = { version = "0.5.1", features = ["retry", "timeout"] }
 tower-sessions = "0.13.0"
-rand = { version = "0.8.5", features=["std_rng"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 chrono-tz = "0.10.0"
 thiserror = "1.0.64"
@@ -54,3 +52,9 @@ features = ["json", "rustls-tls", "cookies"]
 [dev-dependencies]
 fake = "2.10.0"
 wiremock = "0.6.2"
+rand = { version = "0.8.5", features=["std_rng"] }
+
+[workspace.metadata.cross.target.x86_64-unknown-freebsd]
+image = "ghcr.io/cross-rs/x86_64-unknown-freebsd"
+[workspace.metadata.cross.build]
+env.volumes = ["SQLX_OFFLINE=true"]

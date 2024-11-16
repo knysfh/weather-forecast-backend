@@ -3,14 +3,13 @@ use axum::{
     extract::State,
     response::{Html, IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::CookieJar;
 use axum_messages::Messages;
 use sqlx::PgPool;
 use thiserror::Error;
 use tower_sessions::{session, Session};
 use uuid::Uuid;
 
-use crate::start_up::{AppState, SessionData};
+use crate::{routers::login::UserData, start_up::AppState};
 
 #[derive(Error, Debug)]
 pub enum DashboardError {
@@ -32,24 +31,16 @@ impl From<DashboardError> for Redirect {
 
 pub async fn admin_dashboard(
     State(state): State<AppState>,
-    cookie: CookieJar,
     session: Session,
 ) -> Result<Response, Redirect> {
-    let session_id = cookie
-        .get("session_id")
-        .ok_or(DashboardError::SessionNotFound)?;
-
-    let session_data: SessionData = session
-        .get(&session_id.to_string())
+    let user_data: UserData = session
+        .get("user.data")
         .await
         .map_err(|_| DashboardError::InvalidSessionData)?
         .ok_or(DashboardError::SessionNotFound)?;
 
-    let user_id = Uuid::parse_str(&session_data.user_id).map_err(DashboardError::UuidParseError)?;
-
-    let user_name = get_username(user_id, &state.connect_pool)
-        .await
-        .map_err(DashboardError::DatabaseError)?;
+    let user_id = Uuid::parse_str(&user_data.user_id).map_err(DashboardError::UuidParseError)?;
+    let user_name = user_data.user_name;
     let token = get_token_value(user_id, &state.connect_pool)
         .await
         .map_err(DashboardError::DatabaseError)?;
@@ -90,7 +81,7 @@ fn render_dashboard(user_name: &str, token: &str) -> Html<String> {
 }
 
 #[tracing::instrument(name = "Get username", skip(pool))]
-pub async fn get_username(user_id: Uuid, pool: &PgPool) -> Result<String, anyhow::Error> {
+pub async fn _get_username(user_id: Uuid, pool: &PgPool) -> Result<String, anyhow::Error> {
     let row = sqlx::query!(
         r#"
         SELECT username
@@ -136,19 +127,12 @@ pub async fn get_token_value(user_id: Uuid, pool: &PgPool) -> Result<String, any
     }
 }
 
-pub async fn log_out(
-    cookie: CookieJar,
-    session: Session,
-    messages: Messages,
-) -> Result<Redirect, Redirect> {
-    let session_id = cookie
-        .get("session_id")
-        .ok_or(DashboardError::SessionNotFound)?
-        .to_string();
-    let value: Option<SessionData> = session
-        .remove(&session_id.to_string())
+pub async fn log_out(session: Session, messages: Messages) -> Result<Redirect, Redirect> {
+    let value: Option<UserData> = session
+        .remove("user.data")
         .await
         .map_err(|_| DashboardError::SessionNotFound)?;
+    session.cycle_id().await.unwrap();
     if value.is_some() {
         messages.info(format!(
             "<p><i>{}</i></p>",
