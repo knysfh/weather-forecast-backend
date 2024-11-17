@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::weather_client::Coordinate;
+use crate::{errors::DbError, weather_client::Coordinate};
 
 #[derive(Deserialize, Debug)]
 struct WeatherForecastResponse {
@@ -53,8 +53,8 @@ struct WeatherInfoData {
 pub enum ForecastParseError {
     #[error("Invalid time format: {0}")]
     TimeParseError(#[from] ParseError),
-    #[error("Weather data into databse error: {0}")]
-    WeatherDataIntoDatabaseError(#[from] sqlx::Error),
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] DbError),
     #[error("Json data parse Error: {0}")]
     JsonParseError(#[from] serde_json::Error),
 }
@@ -120,9 +120,8 @@ async fn save_weather_data(data: WeatherInfoData, pool: &PgPool) -> Result<(), F
         data.temperature_apparent,
         data.wind_speed,
         data.forecast_time.naive_utc(),
-    ).execute(pool).await.map_err(|e| {tracing::error!(
-        error = %e, 
-        "Database insertion failed"
-    );ForecastParseError::WeatherDataIntoDatabaseError(e)})?;
+    ).execute(pool).await.map_err(|e| ForecastParseError::DatabaseError(e.into())
+)?;
+
     Ok(())
 }

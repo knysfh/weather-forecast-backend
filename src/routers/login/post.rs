@@ -1,6 +1,5 @@
 use std::time::{Duration, SystemTime};
 
-use anyhow::anyhow;
 use axum::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -11,10 +10,23 @@ use reqwest::StatusCode;
 use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::authentication::{validate_credentials, AuthError, Credentials};
+use crate::errors::DbError;
 use crate::start_up::AppState;
+
+#[derive(thiserror::Error, Debug)]
+pub enum LoginError {
+    #[error("Authentication failed")]
+    AuthError(String),
+    #[error("Something went wrong")]
+    UnexpectedError(String),
+    #[error("Maximum login attempts exceeded. Please try again later")]
+    MaxAttemptsExceeded(String),
+    #[error("Database connect error")]
+    DatabaseError(#[from] DbError),
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct FailedLoginAttempt {
@@ -99,7 +111,7 @@ pub struct UserData {
     pub user_name: String,
 }
 
-#[tracing::instrument(skip(state, login_info, session, messages, form), fields(username=tracing::field::Empty, user_id=tracing::field::Empty))]
+#[tracing::instrument(level = "error", skip(state, login_info, session, messages, form), fields(username=tracing::field::Empty, user_id=tracing::field::Empty))]
 pub async fn login(
     State(state): State<AppState>,
     session: Session,
@@ -118,10 +130,9 @@ pub async fn login(
                 .unwrap_or(Duration::from_secs(0));
 
             if elapsed < Duration::from_secs(300) {
-                let max_attempt_err = LoginError::MaxAttemptsExceeded(anyhow!(
-                    "You have exceeded the maximum number of error attempts"
-                ));
-                info!("User logging failed, maximum retry limit reached");
+                let max_attempt_err = LoginError::MaxAttemptsExceeded(
+                    "You have exceeded the maximum number of error attempts".to_string(),
+                );
                 return Err(login_redirect(max_attempt_err, messages));
             } else {
                 login_info.flush_failed_info().await;
@@ -151,13 +162,23 @@ pub async fn login(
         }
         Err(error) => {
             let e = match error {
-                AuthError::InvalidCredentials(_) => {
+                AuthError::InvalidCredentials(err) => {
                     login_info.add_failed_count().await;
-                    LoginError::AuthError(error.into())
+                    info!("Authentication failed, details: {}", err);
+                    LoginError::AuthError(err)
                 }
-                AuthError::UnexpectedError(_) => LoginError::UnexpectedError(error.into()),
+                AuthError::UnexpectedError(err) => {
+                    error!("Unexpected error, details: {}", err.to_string());
+                    LoginError::UnexpectedError(err)
+                }
+                AuthError::DatabaseError(err) => {
+                    error!(
+                        "User logging failed, database error, details: {}",
+                        err.to_string()
+                    );
+                    LoginError::DatabaseError(err.into())
+                }
             };
-            info!("User logging failed, authentication failed");
             Err(login_redirect(e, messages))
         }
     }
@@ -169,14 +190,4 @@ pub fn login_redirect(e: LoginError, messages: Messages) -> Redirect {
         htmlescape::encode_minimal(&e.to_string())
     ));
     Redirect::to("/login")
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum LoginError {
-    #[error("Authentication failed")]
-    AuthError(#[source] anyhow::Error),
-    #[error("Something went wrong")]
-    UnexpectedError(#[from] anyhow::Error),
-    #[error("Maximum login attempts exceeded. Please try again later")]
-    MaxAttemptsExceeded(#[source] anyhow::Error),
 }

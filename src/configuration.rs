@@ -1,6 +1,7 @@
 use config::Config;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use tracing::error;
 
 use crate::weather_client::WeatherClient;
 
@@ -79,7 +80,11 @@ pub fn get_configuration() -> Result<Settings, config::ConfigError> {
             config::File::from(configuration_directory.join(environment.as_str())).required(true),
         )
         .add_source(config::Environment::with_prefix("app").separator("_"))
-        .build()?;
+        .build()
+        .map_err(|e| {
+            error!("config read error, details: {}", e.to_string());
+            e
+        })?;
 
     settings.try_deserialize()
 }

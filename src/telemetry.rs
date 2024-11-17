@@ -5,8 +5,10 @@ use tracing_subscriber::FmtSubscriber;
 pub fn get_subscriber() -> FmtSubscriber {
     FmtSubscriber::builder()
         .with_max_level(Level::INFO)
+        .with_file(true)
         .with_line_number(true)
-        .with_target(true)
+        .with_thread_ids(true)
+        .with_target(false)
         .finish()
 }
 

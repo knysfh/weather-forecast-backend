@@ -1,4 +1,3 @@
-use anyhow::Context;
 use axum::{
     extract::State,
     response::{Html, IntoResponse, Redirect, Response},
@@ -9,16 +8,16 @@ use thiserror::Error;
 use tower_sessions::{session, Session};
 use uuid::Uuid;
 
-use crate::{routers::login::UserData, start_up::AppState};
+use crate::{errors::DbError, routers::login::UserData, start_up::AppState};
 
 #[derive(Error, Debug)]
 pub enum DashboardError {
     #[error("Session not found")]
-    SessionNotFound,
+    SessionNotFound(String),
     #[error("Invalid session data")]
-    InvalidSessionData,
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] anyhow::Error),
+    InvalidSessionData(String),
+    #[error(transparent)]
+    DatabaseError(#[from] DbError),
     #[error("Invalid UUID: {0}")]
     UuidParseError(#[from] uuid::Error),
 }
@@ -36,14 +35,16 @@ pub async fn admin_dashboard(
     let user_data: UserData = session
         .get("user.data")
         .await
-        .map_err(|_| DashboardError::InvalidSessionData)?
-        .ok_or(DashboardError::SessionNotFound)?;
+        .map_err(|e| {
+            DashboardError::InvalidSessionData(format!("Session query error, details: {}", e))
+        })?
+        .ok_or(DashboardError::SessionNotFound(format!(
+            "User session data not found"
+        )))?;
 
     let user_id = Uuid::parse_str(&user_data.user_id).map_err(DashboardError::UuidParseError)?;
     let user_name = user_data.user_name;
-    let token = get_token_value(user_id, &state.connect_pool)
-        .await
-        .map_err(DashboardError::DatabaseError)?;
+    let token = get_token_value(user_id, &state.connect_pool).await?;
     Ok(render_dashboard(&user_name, &token).into_response())
 }
 
@@ -81,7 +82,7 @@ fn render_dashboard(user_name: &str, token: &str) -> Html<String> {
 }
 
 #[tracing::instrument(name = "Get username", skip(pool))]
-pub async fn _get_username(user_id: Uuid, pool: &PgPool) -> Result<String, anyhow::Error> {
+pub async fn _get_username(user_id: Uuid, pool: &PgPool) -> Result<String, DashboardError> {
     let row = sqlx::query!(
         r#"
         SELECT username
@@ -92,12 +93,12 @@ pub async fn _get_username(user_id: Uuid, pool: &PgPool) -> Result<String, anyho
     )
     .fetch_one(pool)
     .await
-    .context("Failed to perform a query to retrieve a username.")?;
+    .map_err(|e| DashboardError::DatabaseError(e.into()))?;
     Ok(row.username)
 }
 
 #[tracing::instrument(name = "Get token value", skip(pool))]
-pub async fn get_token_value(user_id: Uuid, pool: &PgPool) -> Result<String, anyhow::Error> {
+pub async fn get_token_value(user_id: Uuid, pool: &PgPool) -> Result<String, DashboardError> {
     let row = sqlx::query!(
         r#"
         SELECT token
@@ -108,7 +109,7 @@ pub async fn get_token_value(user_id: Uuid, pool: &PgPool) -> Result<String, any
     )
     .fetch_optional(pool)
     .await
-    .context("Failed to perform a query to retrieve a username.")?;
+    .map_err(|e| DashboardError::DatabaseError(e.into()))?;
     if let Some(row) = row {
         Ok(row.token)
     } else {
@@ -122,7 +123,8 @@ pub async fn get_token_value(user_id: Uuid, pool: &PgPool) -> Result<String, any
             token
         )
         .execute(pool)
-        .await?;
+        .await
+        .map_err(|e| DashboardError::DatabaseError(e.into()))?;
         Ok(token)
     }
 }
@@ -131,7 +133,7 @@ pub async fn log_out(session: Session, messages: Messages) -> Result<Redirect, R
     let value: Option<UserData> = session
         .remove("user.data")
         .await
-        .map_err(|_| DashboardError::SessionNotFound)?;
+        .map_err(|_| DashboardError::SessionNotFound("User session data not found".to_string()))?;
     session.cycle_id().await.unwrap();
     if value.is_some() {
         messages.info(format!(

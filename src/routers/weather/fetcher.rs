@@ -7,8 +7,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
 use thiserror::Error;
+use tracing::error;
 use uuid::Uuid;
 
+use crate::errors::DbError;
 use crate::start_up::AppState;
 use crate::weather_client::Coordinate;
 use crate::weather_client::CoordinateParseError;
@@ -39,6 +41,8 @@ pub enum UpdateWeatherError {
     InternalError,
     #[error("Invalid Location format: {0}")]
     LocationError(#[from] CoordinateParseError),
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] DbError),
     #[error("Request weather server error: {0}")]
     WeatherServerError(#[from] reqwest::Error),
     #[error("Forecast parse error: {0}")]
@@ -86,7 +90,7 @@ impl IntoResponse for UpdateWeatherError {
                     "TIME_PARSE_ERROR",
                     "Forecast time format parse error",
                 ),
-                ForecastParseError::WeatherDataIntoDatabaseError(_) => (
+                ForecastParseError::DatabaseError(_) => (
                     StatusCode::BAD_REQUEST,
                     "WEATHER_DATABASE_ERROR",
                     "Weather data write database error",
@@ -97,6 +101,11 @@ impl IntoResponse for UpdateWeatherError {
                     "Weather data json parse error",
                 ),
             },
+            UpdateWeatherError::DatabaseError(_) => (
+                StatusCode::BAD_REQUEST,
+                "WEATHER_DATABASE_ERROR",
+                "Database connection error",
+            ),
         };
 
         let body = Json(WeatherResponse {
@@ -108,16 +117,21 @@ impl IntoResponse for UpdateWeatherError {
     }
 }
 
+#[tracing::instrument(skip(state, weather_request))]
 pub async fn update_weather_data(
     State(state): State<AppState>,
     weather_request: Result<Json<WeatherRequestInfo>, JsonRejection>,
 ) -> Result<Json<WeatherResponse>, UpdateWeatherError> {
-    let Json(request) = weather_request.map_err(UpdateWeatherError::UserPostJsonError)?;
+    let Json(request) = weather_request.map_err(|err| {
+        error!(
+            "The JSON data sent by the user is incorrect, details: {}",
+            err.to_string()
+        );
+        UpdateWeatherError::UserPostJsonError(err)
+    })?;
 
     let user_token = request.token;
-    let validate_bool = validate_token(&user_token, &state.connect_pool)
-        .await
-        .map_err(|e| UpdateWeatherError::UserValidationError(e.to_string()))?;
+    let validate_bool = validate_token(&user_token, &state.connect_pool).await?;
     let mut weather_response = WeatherResponse {
         status: "SUCCESS_UPDATE".to_owned(),
         content: "Success update weather info".to_owned(),
@@ -127,16 +141,21 @@ pub async fn update_weather_data(
         weather_response.status = "FAILED_UPDATE".to_owned();
         return Ok(Json(weather_response));
     }
-    let location =
-        Coordinate::parse(request.location).map_err(UpdateWeatherError::LocationError)?;
+    let location = Coordinate::parse(request.location)
+        .map_err(|err| UpdateWeatherError::LocationError(err))?;
     let city_name = request.city_name;
     let forecast_value = state
         .weather_client
         .get_weather_forecast(&location)
         .await
-        .map_err(|err| UpdateWeatherError::WeatherServerError(err))?;
+        .map_err(|err| {
+            error!(
+                "The JSON data sent by the user is incorrect, details: {}",
+                err.to_string()
+            );
+            UpdateWeatherError::WeatherServerError(err)
+        })?;
     let user_id = get_user_id_by_token(&state.connect_pool, &user_token).await?;
-    dbg!(&user_id);
     let _ = parse_forecast_data(
         forecast_value,
         &location,
@@ -145,29 +164,56 @@ pub async fn update_weather_data(
         &state.connect_pool,
     )
     .await
-    .map_err(|err| UpdateWeatherError::ForecastWriteError(err))?;
+    .map_err(|err| {
+        error!(
+            "Error parsing weather forecast data, details: {}",
+            err.to_string()
+        );
+        UpdateWeatherError::ForecastWriteError(err)
+    })?;
     Ok(Json(weather_response))
 }
 
 #[tracing::instrument(name = "Update weather validate token", skip(token, pool))]
-async fn validate_token(token: &str, pool: &PgPool) -> Result<bool, anyhow::Error> {
+async fn validate_token(token: &str, pool: &PgPool) -> Result<bool, UpdateWeatherError> {
     let row = sqlx::query!(
         r#"SELECT EXISTS(SELECT 1 FROM tokens WHERE token = $1)"#,
         token
     )
     .fetch_one(pool)
-    .await?;
-    Ok(row.exists.unwrap_or(false))
+    .await
+    .map_err(|err| {
+        error!("Failed to validate token, details: {}", err.to_string());
+        UpdateWeatherError::ForecastWriteError(ForecastParseError::DatabaseError(err.into()))
+    })?;
+
+    match row.exists {
+        Some(true) => Ok(true),
+        Some(false) => {
+            error!("Token not found in the database");
+            Ok(false)
+        }
+        None => {
+            error!("An exception occurred while verifying the token");
+            Ok(false)
+        }
+    }
 }
 
 pub async fn get_user_id_by_token(pool: &PgPool, token: &str) -> Result<Uuid, UpdateWeatherError> {
     let user_id = sqlx::query_scalar!("SELECT user_id FROM tokens WHERE token = $1", token)
         .fetch_optional(pool)
         .await
-        .map_err(|e| UpdateWeatherError::UserValidationError(e.to_string()))?
-        .ok_or(UpdateWeatherError::UserValidationError(
-            "Uuid does not exist".to_string(),
-        ))?;
-
+        .map_err(|err| {
+            error!(
+                "Failed to query user_id through token, details: {}",
+                err.to_string()
+            );
+            UpdateWeatherError::DatabaseError(err.into())
+        })?
+        .ok_or_else(|| {
+            error!("Uuid does not exist.",);
+            UpdateWeatherError::UserValidationError("Uuid does not exist".to_string())
+        })?;
     Ok(user_id)
 }

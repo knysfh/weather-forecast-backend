@@ -3,7 +3,7 @@ use std::num::ParseFloatError;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
-use tracing::info;
+use tracing::{error, info};
 
 pub struct Coordinate {
     pub latitude: f64,
@@ -27,14 +27,14 @@ impl Coordinate {
             return Err(CoordinateParseError::Format);
         };
 
-        let latitude = parts[0]
-            .trim()
-            .parse::<f64>()
-            .map_err(CoordinateParseError::ParseFloat)?;
-        let longitude = parts[1]
-            .trim()
-            .parse::<f64>()
-            .map_err(CoordinateParseError::ParseFloat)?;
+        let latitude = parts[0].trim().parse::<f64>().map_err(|e| {
+            error!("parse latitude error, details: {}", e.to_string());
+            CoordinateParseError::ParseFloat(e)
+        })?;
+        let longitude = parts[1].trim().parse::<f64>().map_err(|e| {
+            error!("parse longitude error, details: {}", e.to_string());
+            CoordinateParseError::ParseFloat(e)
+        })?;
         if (latitude < -90.0) || (latitude > 90.0) {
             return Err(CoordinateParseError::InvalidValue);
         } else if (longitude < -180.0) || (longitude > 180.0) {
@@ -87,11 +87,7 @@ impl WeatherClient {
             .send()
             .await?
             .error_for_status()?;
-        info!(
-            location = &location,
-            "forecast status: {}",
-            forecast_response.status()
-        );
+        info!(location = &location, "Update forecast data success",);
         let forecast_json = forecast_response.json().await?;
         Ok(forecast_json)
     }
